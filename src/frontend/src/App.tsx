@@ -1,0 +1,2272 @@
+import {
+  Activity,
+  AlertTriangle,
+  Bell,
+  ChevronLeft,
+  ChevronRight,
+  Pause,
+  Play,
+  Terminal,
+  Trash2,
+  TrendingUp,
+  Zap,
+} from "lucide-react";
+import { AnimatePresence, motion } from "motion/react";
+import { useEffect, useRef, useState } from "react";
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+
+// ─────────────────────────────────────────────────────────
+// Types
+// ─────────────────────────────────────────────────────────
+
+type ExitRule =
+  | "Rule 1: Kinetic Decoupling"
+  | "Rule 2: MFI Saturation Override"
+  | "Rule 3: MACD Inertia Breaker"
+  | "Rule 4: ROC21 Exhaustion Plateau";
+
+type TabId = "overview" | "pricechart" | "exitmodules" | "log" | "alerts";
+
+interface DataRow {
+  index: number;
+  price: number;
+  roc21: number;
+  rsi: number;
+  macd: number;
+  mfi: number;
+  momentumScore: number;
+}
+
+interface AnalyzedRow extends DataRow {
+  exitSignals: ExitRule[];
+  isExit: boolean;
+}
+
+// ─────────────────────────────────────────────────────────
+// Sample data
+// ─────────────────────────────────────────────────────────
+
+const SAMPLE_DATA = `187.7	12.7	67.16	4.62	73.98	60.86
+198.1	17.19	72.15	6.39	67.41	60.86
+196.7	17.19	72.15	6.39	67.41	59.96
+193.65	12.8	64.11	6.54	57.64	60.12
+191.65	12.8	64.11	6.54	57.64	60.27
+196.05	13.56	59.23	6.39	62.94	60.27
+190.15	10.6	58.23	5.96	62.21	60.7
+189.4	10.9	59.55	5.67	65.99	60.88
+190.75	1.4	56.98	5.24	67.72	61.61
+188.95	1.4	56.98	5.24	67.72	61.37
+194	3.4	56.26	4.85	61.31	61.37
+189.9	2.1	55.66	4.46	53.14	59.46
+189.45	1.93	50.07	3.75	48.95	52.53
+185.1	4.15	50.74	3.2	44.46	51.01
+185.65	4.15	50.74	3.2	44.46	52.13
+196	14.37	61.79	3.84	53.52	52.13
+196.55	13.16	62.15	4.04	53.5	50.78
+196.95	11.67	63.22	4.26	59.42	50.49
+198.1	6.88	61.83	4.3	53.5	51.03
+197.25	6.88	61.83	4.3	53.5	50.82
+193.25	1.17	50.99	3.4	52.64	50.82
+189.9	-5.28	48.1	2.74	46.99	50.49
+187.65	-4.65	47.97	2.18	47.32	50.49
+187.55	-0.93	53.76	2.05	46.25	49.88
+191.85	-0.93	53.76	2.05	46.25	49
+191.85	9.16	72.24	3.59	78.27	49
+214	19.72	78.06	5.93	87.11	47.91
+227.65	17.24	71.44	7.25	84.9	48.79
+222.05	22.88	76.23	9.19	86.9	48.89
+234.4	22.88	76.23	9.19	86.9	49.78
+252.7	44.15	85.95	16.32	93.47	49.78
+279.65	48.29	86.21	19.64	94.01	50.01
+281.6	48.43	85.85	21.97	95.25	48.82
+281.2	48.43	85.85	21.97	95.25	48.87
+281.9	49.26	81.23	24.24	92.75	48.87
+277.1	42.55	81.75	24.64	93.78	56.61
+279.4	42.61	81.96	24.75	94.2	55.86
+280.3	39.86	76.84	24.16	92.71	56.49
+275.45	39.86	76.84	24.16	92.71	56.49
+278.3	49.48	82	24.3	92.6	54.58
+294.85	50.89	78.8	24.28	91.87	53.98
+291.6	51.26	74.6	23.64	91.91	54.11
+287.25	50.47	70.06	22.47	89.23	54.09
+282.35	50.47	70.06	22.47	89.23	54.09
+294.15	53.69	74.36	21.87	83.91	63.59`;
+
+// ─────────────────────────────────────────────────────────
+// Parsing
+// ─────────────────────────────────────────────────────────
+
+function parseData(raw: string): DataRow[] {
+  const lines = raw
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  const rows: DataRow[] = [];
+  let idx = 1;
+  for (const line of lines) {
+    const parts = line
+      .split(/\t|\s{2,}|\s+/)
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
+    if (parts.length < 6) continue;
+    const nums = parts.map(Number);
+    if (nums.some(Number.isNaN)) continue;
+    rows.push({
+      index: idx++,
+      price: nums[0],
+      roc21: nums[1],
+      rsi: nums[2],
+      macd: nums[3],
+      mfi: nums[4],
+      momentumScore: nums[5],
+    });
+  }
+  return rows;
+}
+
+// ─────────────────────────────────────────────────────────
+// Analysis
+// ─────────────────────────────────────────────────────────
+
+function analyzeRows(rows: DataRow[]): AnalyzedRow[] {
+  return rows.map((row, i) => {
+    if (i === 0) return { ...row, exitSignals: [], isExit: false };
+    const prev = rows[i - 1];
+    const deltaPrice = row.price - prev.price;
+    const deltaMomentumScore = row.momentumScore - prev.momentumScore;
+    const deltaMFI = row.mfi - prev.mfi;
+    const deltaMACD = row.macd - prev.macd;
+    const signals: ExitRule[] = [];
+
+    if (deltaPrice < 0 && deltaMomentumScore > 0)
+      signals.push("Rule 1: Kinetic Decoupling");
+    if (prev.mfi >= 80 && deltaPrice < 0 && deltaMFI <= -5.0)
+      signals.push("Rule 2: MFI Saturation Override");
+    if ((deltaPrice < 0 && deltaMACD > 0) || row.macd > prev.macd * 2)
+      signals.push("Rule 3: MACD Inertia Breaker");
+    if (row.roc21 === prev.roc21 && deltaPrice < 0)
+      signals.push("Rule 4: ROC21 Exhaustion Plateau");
+
+    return { ...row, exitSignals: signals, isExit: signals.length > 0 };
+  });
+}
+
+// ─────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────
+
+function fmt(n: number, d = 2): string {
+  return n.toFixed(d);
+}
+
+function fmtSign(n: number, d = 2): string {
+  return (n >= 0 ? "+" : "") + n.toFixed(d);
+}
+
+const C = {
+  bg: "#05070A",
+  surface: "#0B1117",
+  surface2: "#0E141B",
+  border: "#1A2430",
+  borderBright: "#243040",
+  text: "#D7DEE7",
+  muted: "#7A8696",
+  teal: "#00C2C7",
+  green: "#22C55E",
+  amber: "#F59E0B",
+  red: "#EF4444",
+  blue: "#7CB6FF",
+} as const;
+
+const RULE_SHORT: Record<ExitRule, string> = {
+  "Rule 1: Kinetic Decoupling": "R1",
+  "Rule 2: MFI Saturation Override": "R2",
+  "Rule 3: MACD Inertia Breaker": "R3",
+  "Rule 4: ROC21 Exhaustion Plateau": "R4",
+};
+
+// ─────────────────────────────────────────────────────────
+// Sub-components
+// ─────────────────────────────────────────────────────────
+
+function StatusPill({
+  type,
+  label,
+}: {
+  type: "active" | "alert" | "ok" | "armed" | "monitoring" | "met" | "notmet";
+  label?: string;
+}) {
+  const styles: Record<string, { bg: string; color: string; border: string }> =
+    {
+      active: { bg: "#052A10", color: C.green, border: "#0A4A1E" },
+      alert: { bg: "#2A0808", color: C.red, border: "#4A1010" },
+      ok: { bg: "#052A10", color: C.green, border: "#0A4A1E" },
+      armed: { bg: "#2A1A02", color: C.amber, border: "#4A2E04" },
+      monitoring: { bg: "#0D1520", color: C.muted, border: C.border },
+      met: { bg: "#2A0808", color: C.red, border: "#4A1010" },
+      notmet: { bg: "#0D1520", color: C.muted, border: C.border },
+    };
+  const s = styles[type];
+  const text =
+    label ??
+    {
+      active: "ACTIVE",
+      alert: "ALERT",
+      ok: "OK",
+      armed: "ARMED",
+      monitoring: "MONITORING",
+      met: "MET",
+      notmet: "NOT MET",
+    }[type];
+  return (
+    <span
+      style={{
+        background: s.bg,
+        color: s.color,
+        border: `1px solid ${s.border}`,
+        padding: "2px 8px",
+        borderRadius: 4,
+        fontSize: 10,
+        fontWeight: 700,
+        letterSpacing: "0.05em",
+        fontFamily: "monospace",
+      }}
+    >
+      {text}
+    </span>
+  );
+}
+
+function SpeedChip({
+  speed,
+  active,
+  onClick,
+}: {
+  speed: 1 | 2 | 5;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        padding: "2px 8px",
+        borderRadius: 4,
+        fontSize: 11,
+        fontWeight: 600,
+        background: active ? C.teal : "transparent",
+        color: active ? C.bg : C.muted,
+        border: `1px solid ${active ? C.teal : C.border}`,
+        cursor: "pointer",
+        fontFamily: "monospace",
+        transition: "all 0.15s",
+      }}
+    >
+      {speed}x
+    </button>
+  );
+}
+
+// ─────────────────────────────────────────────────────────
+// Custom chart tooltip
+// ─────────────────────────────────────────────────────────
+
+function ChartTooltip({
+  active,
+  payload,
+  label,
+}: {
+  active?: boolean;
+  payload?: Array<{ name: string; value: number; color: string }>;
+  label?: string | number;
+}) {
+  if (!active || !payload?.length) return null;
+  return (
+    <div
+      style={{
+        background: C.surface2,
+        border: `1px solid ${C.borderBright}`,
+        padding: "8px 12px",
+        borderRadius: 6,
+        fontSize: 11,
+        fontFamily: "monospace",
+      }}
+    >
+      <div style={{ color: C.muted, marginBottom: 4 }}>Day {label}</div>
+      {payload.map((p) => (
+        <div key={p.name} style={{ color: p.color }}>
+          {p.name}: {p.value?.toFixed(2)}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────
+// Exit dot renderer for price chart
+// ─────────────────────────────────────────────────────────
+
+// isCurrent is passed via a closure wrapper
+function ExitDot(props: any) {
+  const { cx, cy, payload, isCurrent } = props;
+  if (!payload?.isExit) return null;
+  const isCurrentDay = isCurrent && payload?.isCurrentDay;
+  return (
+    <g>
+      {isCurrentDay && (
+        <>
+          <circle
+            cx={cx}
+            cy={cy}
+            r={14}
+            fill="none"
+            stroke="#EF4444"
+            strokeWidth={1.5}
+            strokeOpacity={0.25}
+            style={{ animation: "exitPulse 1s ease-in-out infinite alternate" }}
+          />
+          <circle
+            cx={cx}
+            cy={cy}
+            r={10}
+            fill="none"
+            stroke="#EF4444"
+            strokeWidth={1}
+            strokeOpacity={0.45}
+          />
+        </>
+      )}
+      <circle
+        cx={cx}
+        cy={cy}
+        r={isCurrentDay ? 7 : 5}
+        fill="#EF4444"
+        stroke={isCurrentDay ? "#FF6666" : "#1a0505"}
+        strokeWidth={isCurrentDay ? 2 : 1.5}
+        style={
+          isCurrentDay
+            ? { animation: "exitPulse 1s ease-in-out infinite alternate" }
+            : undefined
+        }
+      />
+      <line
+        x1={cx}
+        y1={0}
+        x2={cx}
+        y2={9999}
+        stroke="#EF4444"
+        strokeWidth={isCurrentDay ? 1.5 : 1}
+        strokeDasharray="3 3"
+        strokeOpacity={isCurrentDay ? 0.5 : 0.35}
+      />
+    </g>
+  );
+}
+
+// ─────────────────────────────────────────────────────────
+// Live EXIT label for ReferenceLine
+// ─────────────────────────────────────────────────────────
+
+function LiveExitLabel(props: any) {
+  const { viewBox } = props;
+  if (!viewBox) return null;
+  const { x, y } = viewBox;
+  return (
+    <g>
+      <rect
+        x={x - 30}
+        y={y + 4}
+        width={64}
+        height={20}
+        rx={4}
+        fill="rgba(239,68,68,0.85)"
+        stroke="#EF4444"
+        strokeWidth={1}
+        style={{ animation: "exitPulse 0.8s ease-in-out infinite alternate" }}
+      />
+      <text
+        x={x + 2}
+        y={y + 18}
+        textAnchor="middle"
+        fill="#FFFFFF"
+        fontSize={10}
+        fontWeight={700}
+        fontFamily="monospace"
+        letterSpacing="0.04em"
+        style={{ animation: "exitPulse 0.8s ease-in-out infinite alternate" }}
+      >
+        ▼ EXIT
+      </text>
+    </g>
+  );
+}
+
+// ─────────────────────────────────────────────────────────
+// App
+// ─────────────────────────────────────────────────────────
+
+export default function App() {
+  const [rawInput, setRawInput] = useState(SAMPLE_DATA);
+  const [analyzedRows, setAnalyzedRows] = useState<AnalyzedRow[]>([]);
+  const [hasLoaded, setHasLoaded] = useState(false);
+  const [currentDay, setCurrentDay] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [playbackSpeed, setPlaybackSpeed] = useState<1 | 2 | 5>(1);
+  const [activeTab, setActiveTab] = useState<TabId>("overview");
+  const [logEntries, setLogEntries] = useState<string[]>([]);
+  const [parseError, setParseError] = useState<string | null>(null);
+
+  const logRef = useRef<HTMLDivElement>(null);
+  const playIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // ── Inject exitPulse CSS animation ──
+  useEffect(() => {
+    const styleId = "exit-pulse-style";
+    if (document.getElementById(styleId)) return;
+    const style = document.createElement("style");
+    style.id = styleId;
+    style.textContent = `
+      @keyframes exitPulse {
+        from { opacity: 1; }
+        to   { opacity: 0.3; }
+      }
+      @keyframes liveBlink {
+        0%, 100% { opacity: 1; }
+        50%       { opacity: 0.35; }
+      }
+    `;
+    document.head.appendChild(style);
+    return () => {
+      const el = document.getElementById(styleId);
+      if (el) el.remove();
+    };
+  }, []);
+
+  // ── Playback timer ──
+  useEffect(() => {
+    if (playIntervalRef.current) {
+      clearInterval(playIntervalRef.current);
+      playIntervalRef.current = null;
+    }
+    if (!isPlaying || !hasLoaded) return;
+    const delay = playbackSpeed === 1 ? 1000 : playbackSpeed === 2 ? 500 : 200;
+    playIntervalRef.current = setInterval(() => {
+      setCurrentDay((prev) => {
+        if (prev >= analyzedRows.length - 1) {
+          setIsPlaying(false);
+          return prev;
+        }
+        const next = prev + 1;
+        const row = analyzedRows[next];
+        if (row) {
+          const dayLabel = `[Day ${next + 1}]`;
+          if (row.isExit) {
+            setLogEntries((l) => [
+              ...l,
+              `${dayLabel} EXIT SIGNAL — ${row.exitSignals.join(", ")}`,
+            ]);
+          } else {
+            setLogEntries((l) => [...l, `${dayLabel} HOLD — No signals`]);
+          }
+        }
+        return next;
+      });
+    }, delay);
+    return () => {
+      if (playIntervalRef.current) clearInterval(playIntervalRef.current);
+    };
+  }, [isPlaying, playbackSpeed, hasLoaded, analyzedRows]);
+
+  // ── Scroll log to bottom ──
+  useEffect(() => {
+    if (logRef.current) {
+      logRef.current.scrollTop = logRef.current.scrollHeight;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Handlers ──
+  function handleLoadRun() {
+    setParseError(null);
+    const rows = parseData(rawInput);
+    if (rows.length === 0) {
+      setParseError("No valid rows found. Check your input format.");
+      return;
+    }
+    const analyzed = analyzeRows(rows);
+    setAnalyzedRows(analyzed);
+    setHasLoaded(true);
+    setCurrentDay(0);
+    setIsPlaying(false);
+    setLogEntries([
+      `[Day 1] Loaded ${analyzed.length} rows. Ready for playback.`,
+    ]);
+  }
+
+  function handleClear() {
+    setRawInput("");
+    setAnalyzedRows([]);
+    setHasLoaded(false);
+    setCurrentDay(0);
+    setIsPlaying(false);
+    setLogEntries([]);
+    setParseError(null);
+  }
+
+  function stepDay(delta: number) {
+    setCurrentDay((prev) => {
+      const next = Math.max(0, Math.min(analyzedRows.length - 1, prev + delta));
+      if (analyzedRows[next]) {
+        const row = analyzedRows[next];
+        const dayLabel = `[Day ${next + 1}]`;
+        if (row.isExit) {
+          setLogEntries((l) => [
+            ...l,
+            `${dayLabel} EXIT SIGNAL — ${row.exitSignals.join(", ")}`,
+          ]);
+        } else {
+          setLogEntries((l) => [...l, `${dayLabel} HOLD — No signals`]);
+        }
+      }
+      return next;
+    });
+  }
+
+  // ── Computed ──
+  const currentRow = hasLoaded ? analyzedRows[currentDay] : null;
+  const entryRow = hasLoaded ? analyzedRows[0] : null;
+  const prevRow =
+    hasLoaded && currentDay > 0 ? analyzedRows[currentDay - 1] : null;
+
+  // First exit row within rows seen so far (up to currentDay)
+  const firstExitRow = hasLoaded
+    ? (analyzedRows.slice(0, currentDay + 1).find((r) => r.isExit) ?? null)
+    : null;
+
+  // Sell price: first exit price if any exit has fired, else current (last) price
+  const sellRow = firstExitRow ?? currentRow;
+
+  const pnlPct =
+    entryRow && sellRow
+      ? ((sellRow.price - entryRow.price) / entryRow.price) * 100
+      : 0;
+
+  const chartData = hasLoaded
+    ? analyzedRows.slice(0, currentDay + 1).map((r, i) => ({
+        day: r.index,
+        price: r.price,
+        roc21: r.roc21,
+        isExit: r.isExit,
+        exitLabel: r.isExit ? r.exitSignals.join(", ") : undefined,
+        isCurrentDay: i === currentDay,
+      }))
+    : [];
+
+  // Price alerts: rows with abs delta > 3%
+  const priceAlerts = hasLoaded
+    ? analyzedRows.filter((r, i) => {
+        if (i === 0) return false;
+        const prev2 = analyzedRows[i - 1];
+        return Math.abs((r.price - prev2.price) / prev2.price) > 0.03;
+      })
+    : [];
+
+  // Rule computations at currentDay
+  function getRuleState(ruleIdx: 0 | 1 | 2 | 3) {
+    if (!currentRow || !prevRow)
+      return {
+        armed: false,
+        conditions: [] as Array<{
+          label: string;
+          current: string;
+          threshold: string;
+          met: boolean;
+        }>,
+      };
+
+    const dp = currentRow.price - prevRow.price;
+    const dMom = currentRow.momentumScore - prevRow.momentumScore;
+    const dMFI = currentRow.mfi - prevRow.mfi;
+    const dMACD = currentRow.macd - prevRow.macd;
+
+    if (ruleIdx === 0) {
+      const c1 = dp < 0;
+      const c2 = dMom > 0;
+      return {
+        armed: c1 && c2,
+        conditions: [
+          {
+            label: "ΔPrice < 0",
+            current: fmtSign(dp),
+            threshold: "< 0",
+            met: c1,
+          },
+          {
+            label: "ΔMomentum > 0",
+            current: fmtSign(dMom),
+            threshold: "> 0",
+            met: c2,
+          },
+        ],
+      };
+    }
+    if (ruleIdx === 1) {
+      const c1 = prevRow.mfi >= 80;
+      const c2 = dp < 0;
+      const c3 = dMFI <= -5.0;
+      return {
+        armed: c1 && c2 && c3,
+        conditions: [
+          {
+            label: "Prev MFI",
+            current: fmt(prevRow.mfi),
+            threshold: "≥ 80",
+            met: c1,
+          },
+          { label: "ΔPrice", current: fmtSign(dp), threshold: "< 0", met: c2 },
+          {
+            label: "ΔMFI",
+            current: fmtSign(dMFI),
+            threshold: "≤ −5.0",
+            met: c3,
+          },
+        ],
+      };
+    }
+    if (ruleIdx === 2) {
+      const c1 = dp < 0 && dMACD > 0;
+      const c2 = currentRow.macd > prevRow.macd * 2;
+      return {
+        armed: c1 || c2,
+        conditions: [
+          {
+            label: "ΔPrice < 0 & ΔMACD > 0",
+            current: `${fmtSign(dp)} / ${fmtSign(dMACD)}`,
+            threshold: "Both true",
+            met: c1,
+          },
+          {
+            label: "Circuit Breaker",
+            current: `${fmt(currentRow.macd)} > ${fmt(prevRow.macd)} × 2`,
+            threshold: "> 2×",
+            met: c2,
+          },
+        ],
+      };
+    }
+    // ruleIdx === 3
+    const c1 = currentRow.roc21 === prevRow.roc21;
+    const c2 = dp < 0;
+    return {
+      armed: c1 && c2,
+      conditions: [
+        {
+          label: "ROC21 unchanged",
+          current: `${fmt(currentRow.roc21)} = ${fmt(prevRow.roc21)}`,
+          threshold: "Exact match",
+          met: c1,
+        },
+        {
+          label: "ΔPrice < 0",
+          current: fmtSign(dp),
+          threshold: "< 0",
+          met: c2,
+        },
+      ],
+    };
+  }
+
+  const moduleConfigs = [
+    {
+      key: "m1",
+      dot: C.red,
+      title: "Primary Kinetic Decoupling",
+      subtitle: "Divergence of price vs. momentum",
+      state: getRuleState(0),
+    },
+    {
+      key: "m2",
+      dot: C.amber,
+      title: "Volume-Weighted Saturation Override",
+      subtitle: "MFI saturation at parabolic peaks",
+      state: getRuleState(1),
+    },
+    {
+      key: "m3",
+      dot: C.blue,
+      title: "MACD Inertia & Singularity Breaker",
+      subtitle: "EMA divergence + circuit breaker",
+      state: getRuleState(2),
+    },
+    {
+      key: "m4",
+      dot: C.green,
+      title: "Kinetic Exhaustion Plateau Trigger",
+      subtitle: "ROC21 zero-derivative with price drop",
+      state: getRuleState(3),
+    },
+  ];
+
+  const tabs: Array<{ id: TabId; label: string }> = [
+    { id: "overview", label: "Overview" },
+    { id: "pricechart", label: "Price Chart" },
+    { id: "exitmodules", label: "Exit Modules" },
+    { id: "log", label: "Execution Log" },
+    { id: "alerts", label: "Price Alerts" },
+  ];
+
+  // ─────────────────────────────────────────────
+  // Render
+  // ─────────────────────────────────────────────
+
+  return (
+    <div
+      className="min-h-screen flex flex-col"
+      style={{
+        background:
+          "radial-gradient(ellipse 120% 60% at 50% 0%, #070C12 0%, #05070A 100%)",
+        color: C.text,
+        fontFamily: "Inter, system-ui, sans-serif",
+      }}
+    >
+      {/* ═══ TOP HEADER ═══ */}
+      <header
+        className="sticky top-0 z-50 flex items-center gap-3 px-4 py-2 border-b"
+        style={{
+          background: C.surface,
+          borderColor: C.border,
+          minHeight: 50,
+          boxShadow: "0 1px 16px rgba(0,0,0,0.6)",
+        }}
+        data-ocid="header.panel"
+      >
+        {/* Logo */}
+        <div className="flex items-center gap-2 shrink-0">
+          <div
+            style={{
+              width: 26,
+              height: 26,
+              borderRadius: 5,
+              background: `linear-gradient(135deg, ${C.teal}, #0099A0)`,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <Zap size={13} color="#05070A" strokeWidth={2.5} />
+          </div>
+          <span
+            style={{
+              fontSize: 13,
+              fontWeight: 700,
+              color: C.text,
+              letterSpacing: "0.02em",
+            }}
+          >
+            QuantViz
+          </span>
+          <span
+            style={{
+              fontSize: 10,
+              color: C.muted,
+              background: C.surface2,
+              border: `1px solid ${C.border}`,
+              padding: "1px 5px",
+              borderRadius: 3,
+              fontFamily: "monospace",
+            }}
+          >
+            v2.0
+          </span>
+        </div>
+
+        {/* KPI strip */}
+        <div className="flex items-center gap-1 flex-1 justify-center">
+          {[
+            {
+              label: "ENTRY",
+              value: entryRow ? `$${fmt(entryRow.price)}` : "—",
+              color: C.text,
+            },
+            {
+              label: "SELL",
+              value: sellRow ? `$${fmt(sellRow.price)}` : "—",
+              color: firstExitRow ? C.red : C.amber,
+            },
+            {
+              label: "P&L",
+              value: hasLoaded
+                ? `${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(2)}%`
+                : "—",
+              color: pnlPct >= 0 ? C.green : C.red,
+            },
+            {
+              label: "DAYS HELD",
+              value: hasLoaded ? `${currentDay + 1}` : "—",
+              color: C.text,
+            },
+          ].map((kpi, ki) => (
+            <div
+              key={kpi.label}
+              data-ocid={`header.kpi.item.${ki + 1}`}
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                padding: "3px 12px",
+                borderRadius: 5,
+                background: C.surface2,
+                border: `1px solid ${C.border}`,
+                minWidth: 70,
+              }}
+            >
+              <span
+                style={{
+                  fontSize: 9,
+                  color: C.muted,
+                  letterSpacing: "0.06em",
+                  fontFamily: "monospace",
+                }}
+              >
+                {kpi.label}
+              </span>
+              <span
+                style={{
+                  fontSize: 14,
+                  fontWeight: 700,
+                  color: kpi.color,
+                  fontFamily: "monospace",
+                }}
+              >
+                {kpi.value}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        {/* Right: status + speed chips */}
+        <div className="flex items-center gap-2 shrink-0">
+          <StatusPill type="active" />
+          <div className="flex gap-1">
+            {([1, 2, 5] as const).map((s) => (
+              <SpeedChip
+                key={s}
+                speed={s}
+                active={playbackSpeed === s}
+                onClick={() => setPlaybackSpeed(s)}
+              />
+            ))}
+          </div>
+          <Bell size={15} color={C.muted} style={{ marginLeft: 4 }} />
+        </div>
+      </header>
+
+      {/* ═══ DATA INPUT PANEL ═══ */}
+      <div
+        style={{
+          background: C.surface,
+          borderBottom: `1px solid ${C.border}`,
+          padding: "12px 16px",
+        }}
+        data-ocid="input.panel"
+      >
+        {/* Column labels */}
+        <div className="flex items-center gap-2 mb-2">
+          <span
+            style={{
+              fontSize: 11,
+              fontWeight: 600,
+              color: C.teal,
+              fontFamily: "monospace",
+              letterSpacing: "0.05em",
+            }}
+          >
+            Data Input
+          </span>
+          <div className="flex gap-3 ml-3">
+            {["PRICE", "ROC21", "RSI", "MACD", "MFI", "Momentum"].map((col) => (
+              <span
+                key={col}
+                style={{
+                  fontSize: 9,
+                  color: C.muted,
+                  fontFamily: "monospace",
+                  letterSpacing: "0.05em",
+                  textTransform: "uppercase",
+                }}
+              >
+                {col}
+              </span>
+            ))}
+          </div>
+        </div>
+        <div className="flex gap-2 items-start">
+          <textarea
+            data-ocid="data.textarea"
+            value={rawInput}
+            onChange={(e) => setRawInput(e.target.value)}
+            rows={4}
+            placeholder="Paste tab-separated data here (PRICE  ROC21  RSI  MACD  MFI  Momentum)..."
+            spellCheck={false}
+            style={{
+              flex: 1,
+              fontFamily: "monospace",
+              fontSize: 11,
+              background: C.bg,
+              border: `1px solid ${C.borderBright}`,
+              borderRadius: 6,
+              color: C.text,
+              padding: "8px 10px",
+              resize: "vertical",
+              lineHeight: 1.7,
+              outline: "none",
+            }}
+          />
+          <div className="flex flex-col gap-2">
+            <button
+              type="button"
+              data-ocid="input.submit_button"
+              onClick={handleLoadRun}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "7px 14px",
+                borderRadius: 6,
+                background: "transparent",
+                border: `1px solid ${C.teal}`,
+                color: C.teal,
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: "pointer",
+                whiteSpace: "nowrap",
+                transition: "all 0.15s",
+              }}
+            >
+              <Play size={12} />
+              Load & Run
+            </button>
+            <button
+              type="button"
+              data-ocid="input.delete_button"
+              onClick={handleClear}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "7px 14px",
+                borderRadius: 6,
+                background: "transparent",
+                border: `1px solid ${C.red}`,
+                color: C.red,
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: "pointer",
+                whiteSpace: "nowrap",
+                transition: "all 0.15s",
+              }}
+            >
+              <Trash2 size={12} />
+              Clear
+            </button>
+          </div>
+        </div>
+        {parseError && (
+          <div
+            data-ocid="data.error_state"
+            style={{
+              marginTop: 6,
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              fontSize: 11,
+              color: C.red,
+              background: "#2A0808",
+              border: "1px solid #4A1010",
+              borderRadius: 5,
+              padding: "5px 10px",
+            }}
+          >
+            <AlertTriangle size={12} />
+            {parseError}
+          </div>
+        )}
+      </div>
+
+      {/* ═══ TAB NAVIGATION ═══ */}
+      <div
+        style={{
+          background: C.surface,
+          borderBottom: `1px solid ${C.border}`,
+          padding: "0 16px",
+          display: "flex",
+          gap: 0,
+        }}
+        data-ocid="tabs.panel"
+      >
+        {tabs.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            data-ocid={`tabs.${tab.id}.tab`}
+            onClick={() => setActiveTab(tab.id)}
+            style={{
+              padding: "10px 14px",
+              fontSize: 12,
+              fontWeight: activeTab === tab.id ? 600 : 500,
+              color: activeTab === tab.id ? C.teal : C.muted,
+              background: "transparent",
+              border: "none",
+              borderBottom:
+                activeTab === tab.id
+                  ? `2px solid ${C.teal}`
+                  : "2px solid transparent",
+              cursor: "pointer",
+              transition: "all 0.15s",
+              marginBottom: -1,
+            }}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {/* ═══ MAIN CONTENT ═══ */}
+      <main className="flex-1" style={{ padding: "16px", paddingBottom: 100 }}>
+        {!hasLoaded && (
+          <div
+            data-ocid="empty.empty_state"
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: "80px 20px",
+              color: C.muted,
+              textAlign: "center",
+            }}
+          >
+            <Activity size={40} style={{ opacity: 0.3, marginBottom: 12 }} />
+            <p style={{ fontSize: 14, marginBottom: 4 }}>No data loaded</p>
+            <p style={{ fontSize: 12, opacity: 0.7 }}>
+              Paste your tab-separated data above and click{" "}
+              <span style={{ color: C.teal }}>Load &amp; Run</span>
+            </p>
+          </div>
+        )}
+
+        <AnimatePresence mode="wait">
+          {hasLoaded && (
+            <motion.div
+              key={activeTab}
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -4 }}
+              transition={{ duration: 0.2 }}
+            >
+              {/* ─── OVERVIEW TAB ─── */}
+              {activeTab === "overview" && currentRow && (
+                <div
+                  style={{ display: "flex", flexDirection: "column", gap: 14 }}
+                >
+                  {/* 5 metric tiles */}
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "repeat(5, 1fr)",
+                      gap: 8,
+                    }}
+                  >
+                    {[
+                      {
+                        label: "PRICE",
+                        value: `$${fmt(currentRow.price)}`,
+                        color: C.teal,
+                      },
+                      {
+                        label: "ROC21",
+                        value: `${fmtSign(currentRow.roc21)}%`,
+                        color: currentRow.roc21 >= 0 ? C.green : C.red,
+                      },
+                      {
+                        label: "RSI",
+                        value: fmt(currentRow.rsi),
+                        color:
+                          currentRow.rsi > 70
+                            ? C.red
+                            : currentRow.rsi < 30
+                              ? C.green
+                              : C.text,
+                      },
+                      {
+                        label: "MACD",
+                        value: fmt(currentRow.macd),
+                        color: currentRow.macd >= 0 ? C.green : C.red,
+                      },
+                      {
+                        label: "MFI",
+                        value: fmt(currentRow.mfi),
+                        color: currentRow.mfi >= 80 ? C.amber : C.text,
+                      },
+                    ].map((tile, ti) => (
+                      <div
+                        key={tile.label}
+                        data-ocid={`overview.metric.item.${ti + 1}`}
+                        style={{
+                          background: C.surface,
+                          border: `1px solid ${C.border}`,
+                          borderRadius: 8,
+                          padding: "12px 14px",
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: 4,
+                        }}
+                      >
+                        <span
+                          style={{
+                            fontSize: 10,
+                            color: C.muted,
+                            fontFamily: "monospace",
+                            letterSpacing: "0.06em",
+                          }}
+                        >
+                          {tile.label}
+                        </span>
+                        <span
+                          style={{
+                            fontSize: 22,
+                            fontWeight: 700,
+                            color: tile.color,
+                            fontFamily: "monospace",
+                          }}
+                        >
+                          {tile.value}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Price chart */}
+                  <div
+                    style={{
+                      background: C.surface,
+                      border: `1px solid ${C.border}`,
+                      borderRadius: 8,
+                      padding: "14px",
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: 11,
+                        color: C.muted,
+                        marginBottom: 10,
+                        fontFamily: "monospace",
+                        letterSpacing: "0.05em",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                      }}
+                    >
+                      PRICE SERIES
+                      {isPlaying && (
+                        <span
+                          style={{
+                            fontSize: 9,
+                            fontWeight: 700,
+                            color: C.red,
+                            background: "rgba(239,68,68,0.12)",
+                            border: `1px solid ${C.red}`,
+                            borderRadius: 4,
+                            padding: "1px 5px",
+                            letterSpacing: "0.06em",
+                            animation: "liveBlink 1s ease-in-out infinite",
+                          }}
+                        >
+                          ● LIVE
+                        </span>
+                      )}
+                    </div>
+                    <ResponsiveContainer width="100%" height={180}>
+                      <LineChart
+                        data={chartData}
+                        margin={{ top: 24, right: 10, left: 0, bottom: 0 }}
+                      >
+                        <CartesianGrid
+                          strokeDasharray="2 4"
+                          stroke={C.border}
+                        />
+                        <XAxis
+                          dataKey="day"
+                          tick={{ fill: C.muted, fontSize: 10 }}
+                          tickLine={false}
+                          axisLine={false}
+                        />
+                        <YAxis
+                          tick={{ fill: C.muted, fontSize: 10 }}
+                          tickLine={false}
+                          axisLine={false}
+                          width={50}
+                        />
+                        <Tooltip content={<ChartTooltip />} />
+                        {entryRow && (
+                          <ReferenceLine
+                            y={entryRow.price}
+                            stroke={C.green}
+                            strokeDasharray="4 3"
+                            label={{
+                              value: "Entry",
+                              fill: C.green,
+                              fontSize: 10,
+                            }}
+                          />
+                        )}
+                        {chartData
+                          .filter((d) => d.isExit)
+                          .map((d) => (
+                            <ReferenceLine
+                              key={`exit-line-${d.day}`}
+                              x={d.day}
+                              stroke={C.red}
+                              strokeWidth={2}
+                              strokeOpacity={0.85}
+                            />
+                          ))}
+                        {currentRow && !currentRow.isExit && (
+                          <ReferenceLine
+                            x={currentRow.index}
+                            stroke={C.teal}
+                            strokeWidth={1}
+                            strokeDasharray="2 4"
+                            strokeOpacity={0.7}
+                          />
+                        )}
+                        {currentRow?.isExit && (
+                          <ReferenceLine
+                            x={currentRow.index}
+                            stroke={C.red}
+                            strokeWidth={2}
+                            strokeOpacity={1}
+                            label={<LiveExitLabel />}
+                          />
+                        )}
+                        <Line
+                          type="monotone"
+                          dataKey="price"
+                          name="Price"
+                          stroke={C.teal}
+                          strokeWidth={2}
+                          dot={(dotProps: any) => (
+                            <ExitDot {...dotProps} isCurrent={true} />
+                          )}
+                          activeDot={{ r: 4, fill: C.teal }}
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+
+                  {/* 2×2 indicator cards */}
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "1fr 1fr",
+                      gap: 10,
+                    }}
+                  >
+                    {moduleConfigs.map((mod, mi) => {
+                      const isAlert = mod.state.armed;
+                      return (
+                        <div
+                          key={mod.key}
+                          data-ocid={`overview.module.item.${mi + 1}`}
+                          style={{
+                            background: C.surface,
+                            border: `1px solid ${isAlert ? C.red : C.border}`,
+                            borderRadius: 8,
+                            padding: "12px 14px",
+                            boxShadow: isAlert
+                              ? "0 0 10px rgba(239,68,68,0.15)"
+                              : "none",
+                          }}
+                        >
+                          <div
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "space-between",
+                              marginBottom: 8,
+                            }}
+                          >
+                            <div
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 6,
+                              }}
+                            >
+                              <span
+                                style={{
+                                  width: 8,
+                                  height: 8,
+                                  borderRadius: "50%",
+                                  background: mod.dot,
+                                  display: "inline-block",
+                                }}
+                              />
+                              <span
+                                style={{
+                                  fontSize: 11,
+                                  fontWeight: 600,
+                                  color: C.text,
+                                }}
+                              >
+                                {mod.title}
+                              </span>
+                            </div>
+                            <StatusPill type={isAlert ? "alert" : "ok"} />
+                          </div>
+                          <div
+                            style={{
+                              fontSize: 10,
+                              color: C.muted,
+                              marginBottom: 8,
+                            }}
+                          >
+                            {mod.subtitle}
+                          </div>
+                          <div
+                            style={{
+                              display: "flex",
+                              flexDirection: "column",
+                              gap: 4,
+                            }}
+                          >
+                            {mod.state.conditions.map((cond) => (
+                              <div
+                                key={cond.label}
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  justifyContent: "space-between",
+                                  fontSize: 10,
+                                }}
+                              >
+                                <span
+                                  style={{
+                                    color: C.muted,
+                                    fontFamily: "monospace",
+                                  }}
+                                >
+                                  {cond.label}
+                                </span>
+                                <span
+                                  style={{
+                                    color: cond.met ? C.red : C.green,
+                                    fontFamily: "monospace",
+                                  }}
+                                >
+                                  {cond.current}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                          {/* Progress bar representing rule "heat" */}
+                          <div
+                            style={{
+                              marginTop: 8,
+                              height: 3,
+                              background: C.border,
+                              borderRadius: 2,
+                              overflow: "hidden",
+                            }}
+                          >
+                            <div
+                              style={{
+                                height: "100%",
+                                width: isAlert ? "100%" : "20%",
+                                background: isAlert ? C.red : C.teal,
+                                borderRadius: 2,
+                                transition: "width 0.3s",
+                              }}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* ─── PRICE CHART TAB ─── */}
+              {activeTab === "pricechart" && (
+                <div
+                  style={{ display: "flex", flexDirection: "column", gap: 14 }}
+                >
+                  {/* Chart 1: Price Series */}
+                  <div
+                    style={{
+                      background: C.surface,
+                      border: `1px solid ${C.border}`,
+                      borderRadius: 8,
+                      padding: "14px",
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: 11,
+                        color: C.muted,
+                        marginBottom: 10,
+                        fontFamily: "monospace",
+                        letterSpacing: "0.05em",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                      }}
+                    >
+                      PRICE CHART
+                      {isPlaying && (
+                        <span
+                          style={{
+                            fontSize: 9,
+                            fontWeight: 700,
+                            color: C.red,
+                            background: "rgba(239,68,68,0.12)",
+                            border: `1px solid ${C.red}`,
+                            borderRadius: 4,
+                            padding: "1px 5px",
+                            letterSpacing: "0.06em",
+                            animation: "liveBlink 1s ease-in-out infinite",
+                          }}
+                        >
+                          ● LIVE
+                        </span>
+                      )}
+                    </div>
+                    <ResponsiveContainer width="100%" height={260}>
+                      <LineChart
+                        data={chartData}
+                        margin={{ top: 30, right: 14, left: 0, bottom: 0 }}
+                      >
+                        <CartesianGrid
+                          strokeDasharray="2 4"
+                          stroke={C.border}
+                        />
+                        <XAxis
+                          dataKey="day"
+                          tick={{ fill: C.muted, fontSize: 10 }}
+                          tickLine={false}
+                          axisLine={false}
+                        />
+                        <YAxis
+                          tick={{ fill: C.muted, fontSize: 10 }}
+                          tickLine={false}
+                          axisLine={false}
+                          width={55}
+                        />
+                        <Tooltip content={<ChartTooltip />} />
+                        {entryRow && (
+                          <ReferenceLine
+                            y={entryRow.price}
+                            stroke={C.green}
+                            strokeDasharray="4 3"
+                            label={{
+                              value: "Entry",
+                              fill: C.green,
+                              fontSize: 10,
+                            }}
+                          />
+                        )}
+                        {chartData
+                          .filter((d) => d.isExit)
+                          .map((d) => (
+                            <ReferenceLine
+                              key={`exit-line-${d.day}`}
+                              x={d.day}
+                              stroke={C.red}
+                              strokeWidth={2}
+                              strokeOpacity={0.85}
+                            />
+                          ))}
+                        {currentRow && !currentRow.isExit && (
+                          <ReferenceLine
+                            x={currentRow.index}
+                            stroke={C.teal}
+                            strokeWidth={1}
+                            strokeDasharray="2 4"
+                            strokeOpacity={0.7}
+                          />
+                        )}
+                        {currentRow?.isExit && (
+                          <ReferenceLine
+                            x={currentRow.index}
+                            stroke={C.red}
+                            strokeWidth={2}
+                            strokeOpacity={1}
+                            label={<LiveExitLabel />}
+                          />
+                        )}
+                        <Line
+                          type="monotone"
+                          dataKey="price"
+                          name="Price"
+                          stroke={C.teal}
+                          strokeWidth={2}
+                          dot={(dotProps: any) => (
+                            <ExitDot {...dotProps} isCurrent={true} />
+                          )}
+                          activeDot={{ r: 4, fill: C.teal }}
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 12,
+                        marginTop: 8,
+                        fontSize: 10,
+                        fontFamily: "monospace",
+                      }}
+                    >
+                      <span
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 4,
+                          color: "#ef4444",
+                        }}
+                      >
+                        <span
+                          style={{
+                            display: "inline-block",
+                            width: 10,
+                            height: 10,
+                            borderRadius: "50%",
+                            background: "#ef4444",
+                          }}
+                        />
+                        EXIT SIGNAL
+                      </span>
+                      <span
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 4,
+                          color: C.teal,
+                        }}
+                      >
+                        <span
+                          style={{
+                            display: "inline-block",
+                            width: 10,
+                            height: 2,
+                            background: C.teal,
+                          }}
+                        />
+                        CURRENT DAY
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Chart 2: ROC21 */}
+                  <div
+                    style={{
+                      background: C.surface,
+                      border: `1px solid ${C.border}`,
+                      borderRadius: 8,
+                      padding: "14px",
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: 11,
+                        color: C.muted,
+                        marginBottom: 10,
+                        fontFamily: "monospace",
+                        letterSpacing: "0.05em",
+                      }}
+                    >
+                      ROC21 — RATE OF CHANGE
+                    </div>
+                    <ResponsiveContainer width="100%" height={220}>
+                      <LineChart
+                        data={chartData}
+                        margin={{ top: 4, right: 14, left: 0, bottom: 0 }}
+                      >
+                        <CartesianGrid
+                          strokeDasharray="2 4"
+                          stroke={C.border}
+                        />
+                        <XAxis
+                          dataKey="day"
+                          tick={{ fill: C.muted, fontSize: 10 }}
+                          tickLine={false}
+                          axisLine={false}
+                        />
+                        <YAxis
+                          tick={{ fill: C.muted, fontSize: 10 }}
+                          tickLine={false}
+                          axisLine={false}
+                          width={40}
+                        />
+                        <Tooltip content={<ChartTooltip />} />
+                        <ReferenceLine
+                          y={-5}
+                          stroke={C.amber}
+                          strokeDasharray="4 3"
+                          label={{ value: "-5", fill: C.amber, fontSize: 9 }}
+                        />
+                        <ReferenceLine
+                          y={-12}
+                          stroke={C.red}
+                          strokeDasharray="4 3"
+                          label={{ value: "-12", fill: C.red, fontSize: 9 }}
+                        />
+                        <ReferenceLine
+                          y={0}
+                          stroke={C.muted}
+                          strokeDasharray="2 4"
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="roc21"
+                          name="ROC21"
+                          stroke={C.blue}
+                          strokeWidth={2}
+                          dot={false}
+                          activeDot={{ r: 4, fill: C.blue }}
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+              )}
+
+              {/* ─── EXIT MODULES TAB ─── */}
+              {activeTab === "exitmodules" && (
+                <div
+                  style={{ display: "flex", flexDirection: "column", gap: 12 }}
+                >
+                  <p style={{ fontSize: 11, color: C.muted, marginBottom: 4 }}>
+                    All modules evaluated live — conditions update each playback
+                    step
+                  </p>
+                  {moduleConfigs.map((mod, mi) => {
+                    const armed = mod.state.armed;
+                    return (
+                      <motion.div
+                        key={mod.key}
+                        data-ocid={`exitmodules.module.item.${mi + 1}`}
+                        initial={{ opacity: 0, x: -8 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        transition={{ delay: mi * 0.05 }}
+                        style={{
+                          background: C.surface,
+                          border: `1px solid ${armed ? C.amber : C.border}`,
+                          borderRadius: 8,
+                          padding: "14px 16px",
+                          boxShadow: armed
+                            ? "0 0 14px rgba(245,158,11,0.18)"
+                            : "none",
+                        }}
+                      >
+                        {/* Module header */}
+                        <div
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            marginBottom: 10,
+                          }}
+                        >
+                          <div
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 8,
+                            }}
+                          >
+                            <span
+                              style={{
+                                width: 10,
+                                height: 10,
+                                borderRadius: "50%",
+                                background: mod.dot,
+                                display: "inline-block",
+                                boxShadow: `0 0 6px ${mod.dot}66`,
+                              }}
+                            />
+                            <div>
+                              <div
+                                style={{
+                                  fontSize: 12,
+                                  fontWeight: 600,
+                                  color: C.text,
+                                }}
+                              >
+                                {mod.title}
+                              </div>
+                              <div style={{ fontSize: 10, color: C.muted }}>
+                                {mod.subtitle}
+                              </div>
+                            </div>
+                          </div>
+                          <StatusPill type={armed ? "armed" : "monitoring"} />
+                        </div>
+
+                        {/* Conditions table */}
+                        <table
+                          style={{
+                            width: "100%",
+                            fontSize: 11,
+                            borderCollapse: "collapse",
+                          }}
+                        >
+                          <thead>
+                            <tr>
+                              {[
+                                "CONDITION",
+                                "CURRENT",
+                                "THRESHOLD",
+                                "STATUS",
+                              ].map((h) => (
+                                <th
+                                  key={h}
+                                  style={{
+                                    textAlign: "left",
+                                    padding: "4px 8px",
+                                    fontSize: 9,
+                                    letterSpacing: "0.07em",
+                                    color: C.muted,
+                                    borderBottom: `1px solid ${C.border}`,
+                                    fontFamily: "monospace",
+                                  }}
+                                >
+                                  {h}
+                                </th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {mod.state.conditions.map((cond) => (
+                              <tr key={cond.label}>
+                                <td
+                                  style={{
+                                    padding: "5px 8px",
+                                    color: C.text,
+                                    fontFamily: "monospace",
+                                  }}
+                                >
+                                  {cond.label}
+                                </td>
+                                <td
+                                  style={{
+                                    padding: "5px 8px",
+                                    color: C.blue,
+                                    fontFamily: "monospace",
+                                  }}
+                                >
+                                  {cond.current}
+                                </td>
+                                <td
+                                  style={{
+                                    padding: "5px 8px",
+                                    color: C.muted,
+                                    fontFamily: "monospace",
+                                  }}
+                                >
+                                  {cond.threshold}
+                                </td>
+                                <td style={{ padding: "5px 8px" }}>
+                                  <StatusPill
+                                    type={cond.met ? "met" : "notmet"}
+                                  />
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </motion.div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* ─── EXECUTION LOG TAB ─── */}
+              {activeTab === "log" && (
+                <div
+                  style={{
+                    background: C.surface,
+                    border: `1px solid ${C.border}`,
+                    borderRadius: 8,
+                    padding: "14px",
+                  }}
+                  data-ocid="log.panel"
+                >
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: C.teal,
+                      fontFamily: "monospace",
+                      marginBottom: 10,
+                      letterSpacing: "0.05em",
+                    }}
+                  >
+                    &gt; EXECUTION LOG
+                  </div>
+                  <div
+                    ref={logRef}
+                    style={{
+                      background: C.bg,
+                      border: `1px solid ${C.border}`,
+                      borderRadius: 6,
+                      padding: "12px",
+                      height: 400,
+                      overflowY: "auto",
+                      fontFamily: "monospace",
+                      fontSize: 11,
+                      lineHeight: 1.8,
+                    }}
+                    className="qv-scroll"
+                  >
+                    {logEntries.length === 0 ? (
+                      <span style={{ color: C.muted }}>
+                        {/* No entries yet. Start playback to generate log. */}
+                      </span>
+                    ) : (
+                      logEntries.map((entry) => (
+                        <div
+                          key={entry}
+                          style={{
+                            color: entry.includes("EXIT SIGNAL")
+                              ? C.red
+                              : C.green,
+                          }}
+                        >
+                          {entry}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* ─── PRICE ALERTS TAB ─── */}
+              {activeTab === "alerts" && (
+                <div
+                  style={{
+                    background: C.surface,
+                    border: `1px solid ${C.border}`,
+                    borderRadius: 8,
+                    padding: "14px",
+                  }}
+                  data-ocid="alerts.panel"
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      marginBottom: 12,
+                    }}
+                  >
+                    <Bell size={14} color={C.amber} />
+                    <span
+                      style={{ fontSize: 12, fontWeight: 600, color: C.text }}
+                    >
+                      Price Alert History
+                    </span>
+                    <span
+                      style={{
+                        fontSize: 10,
+                        color: C.amber,
+                        background: "#2A1A02",
+                        border: "1px solid #4A2E04",
+                        padding: "1px 6px",
+                        borderRadius: 10,
+                        fontFamily: "monospace",
+                      }}
+                    >
+                      {priceAlerts.length} alerts
+                    </span>
+                  </div>
+
+                  {priceAlerts.length === 0 ? (
+                    <div
+                      data-ocid="alerts.empty_state"
+                      style={{
+                        textAlign: "center",
+                        padding: "40px",
+                        color: C.muted,
+                        fontSize: 12,
+                      }}
+                    >
+                      No price alerts (3%+ swings) detected in current data.
+                    </div>
+                  ) : (
+                    <table
+                      style={{
+                        width: "100%",
+                        fontSize: 11,
+                        borderCollapse: "collapse",
+                      }}
+                    >
+                      <thead>
+                        <tr style={{ background: C.surface2 }}>
+                          {[
+                            "DAY",
+                            "PRICE",
+                            "PREV PRICE",
+                            "ΔPRICE",
+                            "Δ%",
+                            "DIRECTION",
+                          ].map((h) => (
+                            <th
+                              key={h}
+                              style={{
+                                textAlign: "left",
+                                padding: "6px 10px",
+                                fontSize: 9,
+                                letterSpacing: "0.07em",
+                                color: C.muted,
+                                borderBottom: `1px solid ${C.border}`,
+                                fontFamily: "monospace",
+                              }}
+                            >
+                              {h}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {priceAlerts.map((r, ai) => {
+                          const prev2 = analyzedRows[r.index - 2];
+                          const delta = r.price - (prev2?.price ?? r.price);
+                          const deltaPct = prev2
+                            ? (delta / prev2.price) * 100
+                            : 0;
+                          const up = delta >= 0;
+                          return (
+                            <tr
+                              key={r.index}
+                              data-ocid={`alerts.item.${ai + 1}`}
+                              style={{
+                                borderBottom: `1px solid ${C.border}`,
+                                background:
+                                  ai % 2 === 0 ? "transparent" : C.surface2,
+                              }}
+                            >
+                              <td
+                                style={{
+                                  padding: "6px 10px",
+                                  color: C.muted,
+                                  fontFamily: "monospace",
+                                }}
+                              >
+                                Day {r.index}
+                              </td>
+                              <td
+                                style={{
+                                  padding: "6px 10px",
+                                  color: C.teal,
+                                  fontFamily: "monospace",
+                                }}
+                              >
+                                ${fmt(r.price)}
+                              </td>
+                              <td
+                                style={{
+                                  padding: "6px 10px",
+                                  color: C.text,
+                                  fontFamily: "monospace",
+                                }}
+                              >
+                                ${prev2 ? fmt(prev2.price) : "—"}
+                              </td>
+                              <td
+                                style={{
+                                  padding: "6px 10px",
+                                  color: up ? C.green : C.red,
+                                  fontFamily: "monospace",
+                                }}
+                              >
+                                {fmtSign(delta)}
+                              </td>
+                              <td
+                                style={{
+                                  padding: "6px 10px",
+                                  color: up ? C.green : C.red,
+                                  fontFamily: "monospace",
+                                }}
+                              >
+                                {fmtSign(deltaPct)}%
+                              </td>
+                              <td style={{ padding: "6px 10px" }}>
+                                <span
+                                  style={{
+                                    fontSize: 10,
+                                    fontWeight: 700,
+                                    color: up ? C.green : C.red,
+                                    fontFamily: "monospace",
+                                  }}
+                                >
+                                  {up ? "▲ SURGE" : "▼ DROP"}
+                                </span>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              )}
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </main>
+
+      {/* ═══ STICKY PLAYBACK BAR ═══ */}
+      <div
+        style={{
+          position: "fixed",
+          bottom: 0,
+          left: 0,
+          right: 0,
+          zIndex: 50,
+          background: C.surface,
+          borderTop: `1px solid ${C.borderBright}`,
+          padding: "10px 16px",
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          boxShadow: "0 -4px 24px rgba(0,0,0,0.6)",
+        }}
+        data-ocid="playback.panel"
+      >
+        {/* Step back */}
+        <button
+          type="button"
+          data-ocid="playback.pagination_prev"
+          onClick={() => stepDay(-1)}
+          disabled={!hasLoaded || currentDay === 0}
+          style={{
+            width: 30,
+            height: 30,
+            borderRadius: 6,
+            background: "transparent",
+            border: `1px solid ${C.border}`,
+            color: hasLoaded && currentDay > 0 ? C.text : C.muted,
+            cursor: hasLoaded && currentDay > 0 ? "pointer" : "not-allowed",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            opacity: hasLoaded && currentDay > 0 ? 1 : 0.4,
+          }}
+        >
+          <ChevronLeft size={14} />
+        </button>
+
+        {/* Play/Pause */}
+        <button
+          type="button"
+          data-ocid="playback.toggle"
+          onClick={() => setIsPlaying((p) => !p)}
+          disabled={!hasLoaded}
+          style={{
+            width: 36,
+            height: 36,
+            borderRadius: 8,
+            background: hasLoaded ? C.teal : C.border,
+            border: "none",
+            color: C.bg,
+            cursor: hasLoaded ? "pointer" : "not-allowed",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            boxShadow: hasLoaded && isPlaying ? `0 0 14px ${C.teal}55` : "none",
+            transition: "all 0.2s",
+          }}
+        >
+          {isPlaying ? <Pause size={15} /> : <Play size={15} />}
+        </button>
+
+        {/* Step forward */}
+        <button
+          type="button"
+          data-ocid="playback.pagination_next"
+          onClick={() => stepDay(1)}
+          disabled={!hasLoaded || currentDay >= analyzedRows.length - 1}
+          style={{
+            width: 30,
+            height: 30,
+            borderRadius: 6,
+            background: "transparent",
+            border: `1px solid ${C.border}`,
+            color:
+              hasLoaded && currentDay < analyzedRows.length - 1
+                ? C.text
+                : C.muted,
+            cursor:
+              hasLoaded && currentDay < analyzedRows.length - 1
+                ? "pointer"
+                : "not-allowed",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            opacity:
+              hasLoaded && currentDay < analyzedRows.length - 1 ? 1 : 0.4,
+          }}
+        >
+          <ChevronRight size={14} />
+        </button>
+
+        {/* Speed chips */}
+        <div className="flex gap-1">
+          {([1, 2, 5] as const).map((s) => (
+            <SpeedChip
+              key={s}
+              speed={s}
+              active={playbackSpeed === s}
+              onClick={() => setPlaybackSpeed(s)}
+            />
+          ))}
+        </div>
+
+        {/* Day label */}
+        <span
+          style={{
+            fontSize: 13,
+            fontWeight: 700,
+            color: C.teal,
+            fontFamily: "monospace",
+            minWidth: 52,
+          }}
+        >
+          Day {hasLoaded ? currentDay + 1 : "—"}
+        </span>
+        <span style={{ fontSize: 12, color: C.muted, fontFamily: "monospace" }}>
+          / {hasLoaded ? analyzedRows.length : "—"}
+        </span>
+
+        {/* Status pill */}
+        <div style={{ flex: 1 }} />
+        {hasLoaded &&
+          currentRow &&
+          (currentRow.isExit ? (
+            <div
+              data-ocid="playback.error_state"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 5,
+                padding: "4px 10px",
+                borderRadius: 5,
+                background: "#2A0808",
+                border: `1px solid ${C.red}`,
+                fontSize: 11,
+                fontWeight: 700,
+                color: C.red,
+                fontFamily: "monospace",
+              }}
+            >
+              <AlertTriangle size={11} />
+              EXIT SIGNAL
+            </div>
+          ) : (
+            <div
+              data-ocid="playback.success_state"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 5,
+                padding: "4px 10px",
+                borderRadius: 5,
+                background: "#052A10",
+                border: `1px solid ${C.green}`,
+                fontSize: 11,
+                fontWeight: 700,
+                color: C.green,
+                fontFamily: "monospace",
+              }}
+            >
+              <TrendingUp size={11} />
+              No Breakers
+            </div>
+          ))}
+
+        {/* Combined alert mini panel */}
+        <div
+          data-ocid="playback.alert.panel"
+          style={{
+            background: C.surface2,
+            border: `1px solid ${C.borderBright}`,
+            borderRadius: 6,
+            padding: "5px 10px",
+            minWidth: 160,
+            fontSize: 10,
+          }}
+        >
+          <div
+            style={{
+              color: C.muted,
+              fontFamily: "monospace",
+              marginBottom: 2,
+              letterSpacing: "0.05em",
+            }}
+          >
+            COMBINED ALERT
+          </div>
+          {hasLoaded && currentRow?.isExit ? (
+            <div
+              style={{ color: C.red, fontFamily: "monospace", fontWeight: 600 }}
+            >
+              {currentRow.exitSignals.map((s) => RULE_SHORT[s]).join(" · ")}
+            </div>
+          ) : (
+            <div style={{ color: C.green, fontFamily: "monospace" }}>
+              No active alerts
+            </div>
+          )}
+        </div>
+
+        {/* Terminal icon */}
+        <Terminal size={14} color={C.muted} />
+      </div>
+
+      {/* ═══ FOOTER ═══ */}
+      <div style={{ height: 60 }} />
+      {/* spacer for fixed bar */}
+      <footer
+        style={{
+          borderTop: `1px solid ${C.border}`,
+          padding: "10px 16px",
+          textAlign: "center",
+          fontSize: 11,
+          color: C.muted,
+          background: C.surface,
+          marginBottom: 60,
+        }}
+      >
+        © {new Date().getFullYear()}. Built with ❤️ using{" "}
+        <a
+          href={`https://caffeine.ai?utm_source=caffeine-footer&utm_medium=referral&utm_content=${encodeURIComponent(window.location.hostname)}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ color: C.teal, textDecoration: "none" }}
+        >
+          caffeine.ai
+        </a>
+      </footer>
+    </div>
+  );
+}
