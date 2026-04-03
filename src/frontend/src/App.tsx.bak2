@@ -565,23 +565,15 @@ export default function App() {
       ? ((sellRow.price - entryRow.price) / entryRow.price) * 100
       : 0;
 
-  // Full dataset for chart domain (future prices are null so line draws progressively)
   const chartData = hasLoaded
-    ? analyzedRows.map((r, i) => ({
+    ? analyzedRows.slice(0, currentDay + 1).map((r, i) => ({
         day: r.index,
-        price: i <= currentDay ? r.price : null,
-        roc21: i <= currentDay ? r.roc21 : null,
+        price: r.price,
+        roc21: r.roc21,
         isExit: r.isExit,
         exitLabel: r.isExit ? r.exitSignals.join(", ") : undefined,
         isCurrentDay: i === currentDay,
       }))
-    : [];
-
-  // All exit signals across entire dataset (visible from the start)
-  const allExitDays = hasLoaded
-    ? analyzedRows
-        .filter((r) => r.isExit)
-        .map((r) => ({ day: r.index, exitLabel: r.exitSignals.join(", ") }))
     : [];
 
   // Price alerts: rows with abs delta > 3%
@@ -1242,15 +1234,17 @@ export default function App() {
                             }}
                           />
                         )}
-                        {allExitDays.map((d) => (
-                          <ReferenceLine
-                            key={`exit-line-${d.day}`}
-                            x={d.day}
-                            stroke={C.red}
-                            strokeWidth={2}
-                            strokeOpacity={0.85}
-                          />
-                        ))}
+                        {chartData
+                          .filter((d) => d.isExit)
+                          .map((d) => (
+                            <ReferenceLine
+                              key={`exit-line-${d.day}`}
+                              x={d.day}
+                              stroke={C.red}
+                              strokeWidth={2}
+                              strokeOpacity={0.85}
+                            />
+                          ))}
                         {currentRow && !currentRow.isExit && (
                           <ReferenceLine
                             x={currentRow.index}
@@ -1497,15 +1491,17 @@ export default function App() {
                             }}
                           />
                         )}
-                        {allExitDays.map((d) => (
-                          <ReferenceLine
-                            key={`exit-line-${d.day}`}
-                            x={d.day}
-                            stroke={C.red}
-                            strokeWidth={2}
-                            strokeOpacity={0.85}
-                          />
-                        ))}
+                        {chartData
+                          .filter((d) => d.isExit)
+                          .map((d) => (
+                            <ReferenceLine
+                              key={`exit-line-${d.day}`}
+                              x={d.day}
+                              stroke={C.red}
+                              strokeWidth={2}
+                              strokeOpacity={0.85}
+                            />
+                          ))}
                         {currentRow && !currentRow.isExit && (
                           <ReferenceLine
                             x={currentRow.index}

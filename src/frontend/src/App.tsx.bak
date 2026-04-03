@@ -29,9 +29,10 @@ import {
 // ─────────────────────────────────────────────────────────
 
 type ExitRule =
-  | "Rule Alpha: Parabolic Saturation"
-  | "Rule Beta: Kinetic Divergence-Decay"
-  | "Rule Gamma: Structural Trend Invalidation";
+  | "Rule 1: Kinetic Decoupling"
+  | "Rule 2: MFI Saturation Override"
+  | "Rule 3: MACD Inertia Breaker"
+  | "Rule 4: ROC21 Exhaustion Plateau";
 
 type TabId = "overview" | "pricechart" | "exitmodules" | "log" | "alerts";
 
@@ -138,38 +139,22 @@ function parseData(raw: string): DataRow[] {
 
 function analyzeRows(rows: DataRow[]): AnalyzedRow[] {
   return rows.map((row, i) => {
+    if (i === 0) return { ...row, exitSignals: [], isExit: false };
+    const prev = rows[i - 1];
+    const deltaPrice = row.price - prev.price;
+    const deltaMomentumScore = row.momentumScore - prev.momentumScore;
+    const deltaMFI = row.mfi - prev.mfi;
+    const deltaMACD = row.macd - prev.macd;
     const signals: ExitRule[] = [];
 
-    // ── Rule Alpha: Absolute Parabolic Saturation ──
-    // MFI > 95 AND RSI > 75 AND ROC21 > 40
-    if (row.mfi > 95 && row.rsi > 75 && row.roc21 > 40)
-      signals.push("Rule Alpha: Parabolic Saturation");
-
-    // ── Rule Beta: Kinetic Divergence-Decay ──
-    // Price >= Max(last 5 prices) AND MFI_current < MFI_prevPeak AND Momentum_current < Momentum_prevPeak
-    if (i >= 1) {
-      const lookback = rows.slice(Math.max(0, i - 5), i);
-      const maxPriceLast5 = Math.max(...lookback.map((r) => r.price));
-      // previous peak = row with highest MFI in the lookback window
-      const prevPeak = lookback.reduce(
-        (best, r) => (r.mfi > best.mfi ? r : best),
-        lookback[0],
-      );
-      if (
-        row.price >= maxPriceLast5 &&
-        row.mfi < prevPeak.mfi &&
-        row.momentumScore < prevPeak.momentumScore
-      )
-        signals.push("Rule Beta: Kinetic Divergence-Decay");
-    }
-
-    // ── Rule Gamma: Structural Trend Invalidation ──
-    // MACD_current < MACD_previous AND RSI < 50 AND MomentumScore < 60
-    if (i >= 1) {
-      const prev = rows[i - 1];
-      if (row.macd < prev.macd && row.rsi < 50 && row.momentumScore < 60)
-        signals.push("Rule Gamma: Structural Trend Invalidation");
-    }
+    if (deltaPrice < 0 && deltaMomentumScore > 0)
+      signals.push("Rule 1: Kinetic Decoupling");
+    if (prev.mfi >= 80 && deltaPrice < 0 && deltaMFI <= -5.0)
+      signals.push("Rule 2: MFI Saturation Override");
+    if ((deltaPrice < 0 && deltaMACD > 0) || row.macd > prev.macd * 2)
+      signals.push("Rule 3: MACD Inertia Breaker");
+    if (row.roc21 === prev.roc21 && deltaPrice < 0)
+      signals.push("Rule 4: ROC21 Exhaustion Plateau");
 
     return { ...row, exitSignals: signals, isExit: signals.length > 0 };
   });
@@ -203,9 +188,10 @@ const C = {
 } as const;
 
 const RULE_SHORT: Record<ExitRule, string> = {
-  "Rule Alpha: Parabolic Saturation": "Rα",
-  "Rule Beta: Kinetic Divergence-Decay": "Rβ",
-  "Rule Gamma: Structural Trend Invalidation": "Rγ",
+  "Rule 1: Kinetic Decoupling": "R1",
+  "Rule 2: MFI Saturation Override": "R2",
+  "Rule 3: MACD Inertia Breaker": "R3",
+  "Rule 4: ROC21 Exhaustion Plateau": "R4",
 };
 
 // ─────────────────────────────────────────────────────────
@@ -372,6 +358,16 @@ function ExitDot(props: any) {
             ? { animation: "exitPulse 1s ease-in-out infinite alternate" }
             : undefined
         }
+      />
+      <line
+        x1={cx}
+        y1={0}
+        x2={cx}
+        y2={9999}
+        stroke="#EF4444"
+        strokeWidth={isCurrentDay ? 1.5 : 1}
+        strokeDasharray="3 3"
+        strokeOpacity={isCurrentDay ? 0.5 : 0.35}
       />
     </g>
   );
@@ -565,23 +561,15 @@ export default function App() {
       ? ((sellRow.price - entryRow.price) / entryRow.price) * 100
       : 0;
 
-  // Full dataset for chart domain (future prices are null so line draws progressively)
   const chartData = hasLoaded
-    ? analyzedRows.map((r, i) => ({
+    ? analyzedRows.slice(0, currentDay + 1).map((r, i) => ({
         day: r.index,
-        price: i <= currentDay ? r.price : null,
-        roc21: i <= currentDay ? r.roc21 : null,
+        price: r.price,
+        roc21: r.roc21,
         isExit: r.isExit,
         exitLabel: r.isExit ? r.exitSignals.join(", ") : undefined,
         isCurrentDay: i === currentDay,
       }))
-    : [];
-
-  // All exit signals across entire dataset (visible from the start)
-  const allExitDays = hasLoaded
-    ? analyzedRows
-        .filter((r) => r.isExit)
-        .map((r) => ({ day: r.index, exitLabel: r.exitSignals.join(", ") }))
     : [];
 
   // Price alerts: rows with abs delta > 3%
@@ -593,111 +581,106 @@ export default function App() {
       })
     : [];
 
-  // Rule computations at currentDay for Exit Modules tab
-  type RuleStateResult = {
-    armed: boolean;
-    conditions: Array<{
-      label: string;
-      current: string;
-      threshold: string;
-      met: boolean;
-    }>;
-  };
+  // Rule computations at currentDay
+  function getRuleState(ruleIdx: 0 | 1 | 2 | 3) {
+    if (!currentRow || !prevRow)
+      return {
+        armed: false,
+        conditions: [] as Array<{
+          label: string;
+          current: string;
+          threshold: string;
+          met: boolean;
+        }>,
+      };
 
-  function getRuleAlphaState(): RuleStateResult {
-    if (!currentRow) return { armed: false, conditions: [] };
-    const c1 = currentRow.mfi > 95;
-    const c2 = currentRow.rsi > 75;
-    const c3 = currentRow.roc21 > 40;
+    const dp = currentRow.price - prevRow.price;
+    const dMom = currentRow.momentumScore - prevRow.momentumScore;
+    const dMFI = currentRow.mfi - prevRow.mfi;
+    const dMACD = currentRow.macd - prevRow.macd;
+
+    if (ruleIdx === 0) {
+      const c1 = dp < 0;
+      const c2 = dMom > 0;
+      return {
+        armed: c1 && c2,
+        conditions: [
+          {
+            label: "ΔPrice < 0",
+            current: fmtSign(dp),
+            threshold: "< 0",
+            met: c1,
+          },
+          {
+            label: "ΔMomentum > 0",
+            current: fmtSign(dMom),
+            threshold: "> 0",
+            met: c2,
+          },
+        ],
+      };
+    }
+    if (ruleIdx === 1) {
+      const c1 = prevRow.mfi >= 80;
+      const c2 = dp < 0;
+      const c3 = dMFI <= -5.0;
+      return {
+        armed: c1 && c2 && c3,
+        conditions: [
+          {
+            label: "Prev MFI",
+            current: fmt(prevRow.mfi),
+            threshold: "≥ 80",
+            met: c1,
+          },
+          { label: "ΔPrice", current: fmtSign(dp), threshold: "< 0", met: c2 },
+          {
+            label: "ΔMFI",
+            current: fmtSign(dMFI),
+            threshold: "≤ −5.0",
+            met: c3,
+          },
+        ],
+      };
+    }
+    if (ruleIdx === 2) {
+      const c1 = dp < 0 && dMACD > 0;
+      const c2 = currentRow.macd > prevRow.macd * 2;
+      return {
+        armed: c1 || c2,
+        conditions: [
+          {
+            label: "ΔPrice < 0 & ΔMACD > 0",
+            current: `${fmtSign(dp)} / ${fmtSign(dMACD)}`,
+            threshold: "Both true",
+            met: c1,
+          },
+          {
+            label: "Circuit Breaker",
+            current: `${fmt(currentRow.macd)} > ${fmt(prevRow.macd)} × 2`,
+            threshold: "> 2×",
+            met: c2,
+          },
+        ],
+      };
+    }
+    // ruleIdx === 3
+    const c1 = currentRow.roc21 === prevRow.roc21;
+    const c2 = dp < 0;
     return {
-      armed: c1 && c2 && c3,
+      armed: c1 && c2,
       conditions: [
         {
-          label: "MFI",
-          current: fmt(currentRow.mfi),
-          threshold: "> 95",
+          label: "ROC21 unchanged",
+          current: `${fmt(currentRow.roc21)} = ${fmt(prevRow.roc21)}`,
+          threshold: "Exact match",
           met: c1,
         },
         {
-          label: "RSI",
-          current: fmt(currentRow.rsi),
-          threshold: "> 75",
+          label: "ΔPrice < 0",
+          current: fmtSign(dp),
+          threshold: "< 0",
           met: c2,
-        },
-        {
-          label: "ROC21",
-          current: fmt(currentRow.roc21),
-          threshold: "> 40",
-          met: c3,
-        },
-      ],
-    };
-  }
-
-  function getRuleBetaState(): RuleStateResult {
-    if (!currentRow || currentDay < 1) return { armed: false, conditions: [] };
-    const lookback = analyzedRows.slice(
-      Math.max(0, currentDay - 5),
-      currentDay,
-    );
-    const maxPriceLast5 = Math.max(...lookback.map((r) => r.price));
-    const prevPeak = lookback.reduce(
-      (best, r) => (r.mfi > best.mfi ? r : best),
-      lookback[0],
-    );
-    const c1 = currentRow.price >= maxPriceLast5;
-    const c2 = currentRow.mfi < prevPeak.mfi;
-    const c3 = currentRow.momentumScore < prevPeak.momentumScore;
-    return {
-      armed: c1 && c2 && c3,
-      conditions: [
-        {
-          label: "Price ≥ Max(last 5)",
-          current: `$${fmt(currentRow.price)}`,
-          threshold: `≥ $${fmt(maxPriceLast5)}`,
-          met: c1,
-        },
-        {
-          label: "MFI < Peak MFI",
-          current: fmt(currentRow.mfi),
-          threshold: `< ${fmt(prevPeak.mfi)}`,
-          met: c2,
-        },
-        {
-          label: "Momentum < Peak Mom.",
-          current: fmt(currentRow.momentumScore),
-          threshold: `< ${fmt(prevPeak.momentumScore)}`,
-          met: c3,
-        },
-      ],
-    };
-  }
-
-  function getRuleGammaState(): RuleStateResult {
-    if (!currentRow || !prevRow) return { armed: false, conditions: [] };
-    const c1 = currentRow.macd < prevRow.macd;
-    const c2 = currentRow.rsi < 50;
-    const c3 = currentRow.momentumScore < 60;
-    return {
-      armed: c1 && c2 && c3,
-      conditions: [
-        {
-          label: "MACD slope",
-          current: `${fmt(currentRow.macd)} < ${fmt(prevRow.macd)}`,
-          threshold: "Negative",
-          met: c1,
-        },
-        {
-          label: "RSI",
-          current: fmt(currentRow.rsi),
-          threshold: "< 50",
-          met: c2,
-        },
-        {
-          label: "Momentum Score",
-          current: fmt(currentRow.momentumScore),
-          threshold: "< 60",
-          met: c3,
         },
       ],
     };
@@ -705,25 +688,32 @@ export default function App() {
 
   const moduleConfigs = [
     {
-      key: "mAlpha",
+      key: "m1",
       dot: C.red,
-      title: "Rule Alpha: Absolute Parabolic Saturation",
-      subtitle: "MFI > 95 AND RSI > 75 AND ROC21 > 40",
-      state: getRuleAlphaState(),
+      title: "Primary Kinetic Decoupling",
+      subtitle: "Divergence of price vs. momentum",
+      state: getRuleState(0),
     },
     {
-      key: "mBeta",
+      key: "m2",
       dot: C.amber,
-      title: "Rule Beta: Kinetic Divergence-Decay",
-      subtitle: "New price high with decaying MFI & momentum",
-      state: getRuleBetaState(),
+      title: "Volume-Weighted Saturation Override",
+      subtitle: "MFI saturation at parabolic peaks",
+      state: getRuleState(1),
     },
     {
-      key: "mGamma",
+      key: "m3",
       dot: C.blue,
-      title: "Rule Gamma: Structural Trend Invalidation",
-      subtitle: "MACD slope negative AND RSI < 50 AND Momentum < 60",
-      state: getRuleGammaState(),
+      title: "MACD Inertia & Singularity Breaker",
+      subtitle: "EMA divergence + circuit breaker",
+      state: getRuleState(2),
+    },
+    {
+      key: "m4",
+      dot: C.green,
+      title: "Kinetic Exhaustion Plateau Trigger",
+      subtitle: "ROC21 zero-derivative with price drop",
+      state: getRuleState(3),
     },
   ];
 
@@ -1217,8 +1207,6 @@ export default function App() {
                         />
                         <XAxis
                           dataKey="day"
-                          type="number"
-                          domain={["dataMin", "dataMax"]}
                           tick={{ fill: C.muted, fontSize: 10 }}
                           tickLine={false}
                           axisLine={false}
@@ -1242,15 +1230,17 @@ export default function App() {
                             }}
                           />
                         )}
-                        {allExitDays.map((d) => (
-                          <ReferenceLine
-                            key={`exit-line-${d.day}`}
-                            x={d.day}
-                            stroke={C.red}
-                            strokeWidth={2}
-                            strokeOpacity={0.85}
-                          />
-                        ))}
+                        {chartData
+                          .filter((d) => d.isExit)
+                          .map((d) => (
+                            <ReferenceLine
+                              key={`exit-line-${d.day}`}
+                              x={d.day}
+                              stroke={C.red}
+                              strokeWidth={2}
+                              strokeOpacity={0.85}
+                            />
+                          ))}
                         {currentRow && !currentRow.isExit && (
                           <ReferenceLine
                             x={currentRow.index}
@@ -1472,8 +1462,6 @@ export default function App() {
                         />
                         <XAxis
                           dataKey="day"
-                          type="number"
-                          domain={["dataMin", "dataMax"]}
                           tick={{ fill: C.muted, fontSize: 10 }}
                           tickLine={false}
                           axisLine={false}
@@ -1497,15 +1485,17 @@ export default function App() {
                             }}
                           />
                         )}
-                        {allExitDays.map((d) => (
-                          <ReferenceLine
-                            key={`exit-line-${d.day}`}
-                            x={d.day}
-                            stroke={C.red}
-                            strokeWidth={2}
-                            strokeOpacity={0.85}
-                          />
-                        ))}
+                        {chartData
+                          .filter((d) => d.isExit)
+                          .map((d) => (
+                            <ReferenceLine
+                              key={`exit-line-${d.day}`}
+                              x={d.day}
+                              stroke={C.red}
+                              strokeWidth={2}
+                              strokeOpacity={0.85}
+                            />
+                          ))}
                         {currentRow && !currentRow.isExit && (
                           <ReferenceLine
                             x={currentRow.index}
@@ -1618,8 +1608,6 @@ export default function App() {
                         />
                         <XAxis
                           dataKey="day"
-                          type="number"
-                          domain={["dataMin", "dataMax"]}
                           tick={{ fill: C.muted, fontSize: 10 }}
                           tickLine={false}
                           axisLine={false}
